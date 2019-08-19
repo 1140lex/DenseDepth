@@ -1,11 +1,11 @@
-import os, sys, glob, time, pathlib, argparse
+import os, sys, glob, time, pathlib, argparse,keras
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '5'
 
 # Kerasa / TensorFlow
 from loss import depth_loss_function
 from utils import predict, save_images, load_test_data
 from model import create_model
-from data import get_nyu_train_test_data, get_unreal_train_test_data
+from data import get_nyu_train_test_data, get_unreal_train_test_data,get_lexset_train_test_data
 from callbacks import get_nyu_callbacks
 
 from keras.optimizers import Adam
@@ -36,11 +36,16 @@ else:
     print('Will use ' + str(args.gpus) + ' GPUs.')
 
 # Create the model
-model = create_model( existing=args.checkpoint )
+model = create_model()
+if args.checkpoint:
+    model.load_weights(args.checkpoint)
 
 # Data loaders
 if args.data == 'nyu': train_generator, test_generator = get_nyu_train_test_data( args.bs )
 if args.data == 'unreal': train_generator, test_generator = get_unreal_train_test_data( args.bs )
+if args.data == 'lexset': train_generator, test_generator = get_lexset_train_test_data( args.bs )
+    
+
 
 # Training session details
 runID = str(int(time.time())) + '-n' + str(len(train_generator)) + '-e' + str(args.epochs) + '-bs' + str(args.bs) + '-lr' + str(args.lr) + '-' + args.name
@@ -82,9 +87,19 @@ print('Ready for training!\n')
 callbacks = []
 if args.data == 'nyu': callbacks = get_nyu_callbacks(model, basemodel, train_generator, test_generator, load_test_data() if args.full else None , runPath)
 if args.data == 'unreal': callbacks = get_nyu_callbacks(model, basemodel, train_generator, test_generator, load_test_data() if args.full else None , runPath)
+if args.data == 'lexset':
+    # Callback: Learning Rate Scheduler
+    lr_schedule = keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.7, patience=5, min_lr=0.00009, min_delta=1e-2)
+    callbacks.append( lr_schedule ) # reduce learning rate when stuck
+
+    # Callback: save checkpoints
+    callbacks.append(keras.callbacks.ModelCheckpoint(runPath + '/weights.{epoch:02d}-{val_loss:.2f}.hdf5', monitor='val_loss', 
+        verbose=1, save_best_only=False, save_weights_only=True, mode='min', period=1))
 
 # Start training
-model.fit_generator(train_generator, callbacks=callbacks, validation_data=test_generator, epochs=args.epochs, shuffle=True)
+model.fit_generator(train_generator, 
+#                     steps_per_epoch = 10,
+                    callbacks=callbacks, validation_data=test_generator, epochs=args.epochs, shuffle=True)
 
 # Save the final trained model:
 basemodel.save(runPath + '/model.h5')

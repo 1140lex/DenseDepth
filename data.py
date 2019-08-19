@@ -5,6 +5,44 @@ from PIL import Image
 from zipfile import ZipFile
 from keras.utils import Sequence
 from augment import BasicPolicy
+import os
+
+import numpy as np
+import OpenEXR as exr
+import Imath
+
+def readEXR(filename):
+    """Read RGB + Depth data from EXR image file.
+    Parameters
+    ----------
+    filename : str
+        File path.
+    Returns
+    -------
+    img : RGB image in float32 format.
+    Z : Depth buffer in float3.
+    """
+    
+    exrfile = exr.InputFile(filename)
+    dw = exrfile.header()['dataWindow']
+    isize = (dw.max.y - dw.min.y + 1, dw.max.x - dw.min.x + 1)
+    
+    channels = ['R', 'G', 'B']
+    channelData = dict()
+    
+    for c in channels:
+        C = exrfile.channel(c, Imath.PixelType(Imath.PixelType.FLOAT))
+        C = np.fromstring(C, dtype=np.float32)
+        C = np.reshape(C, isize)
+        
+        channelData[c] = C
+    
+    
+    # create RGB image
+    img = np.concatenate([channelData[c][...,np.newaxis] for c in ['R', 'G', 'B']], axis=2)
+    
+    
+    return img
 
 def extract_zip(input_zip):
     input_zip=ZipFile(input_zip)
@@ -114,6 +152,94 @@ class NYU_BasicRGBSequence(Sequence):
 
         return batch_x, batch_y
 
+def get_lexset_train_test_data(batch_size):
+    
+    print("preparing lexset dataset")
+    
+#     color_path = '../CycleGAN-Keras/data/depth/rgb_color/'
+#     depth_path = '../Keras-GAN/pix2pix/datasets/exr/'
+    color_path = 'data/chocofur/rgb_color/'
+    depth_path = 'data/chocofur/rgb_depth_float/'
+    
+    color = os.listdir(color_path)
+    depth = os.listdir(depth_path)
+
+    color.sort()
+    depth.sort()
+
+    color = [color_path+c for c in color]
+    depth = [depth_path+d for d in depth]
+
+
+    num = int(len(color)*0.9)
+
+    train_color = color[:num]
+    val_color = color[num:]
+
+    train_depth = depth[:num]
+    val_depth = depth[num:]
+
+    train = list(zip(train_color,train_depth))
+    val = list(zip(val_color,val_depth))
+
+    print(len(train),len(val))
+    print(train[0],val[0])
+    
+    train_generator = LexSet_dg(train,True,batch_size = batch_size)
+    test_generator = LexSet_dg(val,batch_size = batch_size)
+
+    return train_generator, test_generator
+    
+class LexSet_dg(Sequence):
+    def __init__(self, dataset, augment = False, batch_size=4, is_flip=False, is_addnoise=False, is_erase=False):
+
+        self.dataset = dataset
+        self.policy = BasicPolicy( color_change_ratio=0.50, mirror_ratio=0.50, flip_ratio=0.0 if not is_flip else 0.2, 
+                                    add_noise_peak=0 if not is_addnoise else 20, erase_ratio=-1.0 if not is_erase else 0.5)
+        self.batch_size = batch_size
+        self.shape_rgb = (batch_size,480,640,3)
+        self.shape_depth = (batch_size,240,320,1)
+        self.maxDepth = 1000.0
+        self.augment = augment
+
+        from sklearn.utils import shuffle
+#         self.dataset = shuffle(self.dataset, random_state=1)
+        self.dataset = shuffle(self.dataset)
+
+
+        self.N = len(self.dataset)
+
+    def __len__(self):
+        return int(np.ceil(self.N / float(self.batch_size)))
+
+    def __getitem__(self, idx, is_apply_policy=True):
+        batch_x, batch_y = np.zeros( self.shape_rgb ), np.zeros( self.shape_depth )
+       
+
+        # Augmentation of RGB images
+        for i in range(batch_x.shape[0]):
+            index = min((idx * self.batch_size) + i, self.N-1)
+
+            sample = self.dataset[index]
+            color = np.asarray(Image.open( sample[0] ))
+            depth = readEXR(sample[1])[:,:,:1]*100
+            
+            x = np.clip(color/255,0,1)
+            y = np.clip(depth,0,self.maxDepth)
+            
+            y = DepthNorm(y, maxDepth=self.maxDepth)
+
+            batch_x[i] = nyu_resize(x, 480)
+            batch_y[i] = nyu_resize(y, 240)
+#             batch_x[i] = x
+#             batch_y[i] = y
+
+            if is_apply_policy: batch_x[i], batch_y[i] = self.policy(batch_x[i], batch_y[i])
+
+
+        return batch_x, batch_y
+    
+    
 #================
 # Unreal dataset
 #================
